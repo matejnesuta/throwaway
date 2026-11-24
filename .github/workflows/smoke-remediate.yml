@@ -1,0 +1,28 @@
+name: Smoke test — remediate (pr-url & changed-files)
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: da
+        uses: trustification/trustify-da-action@main
+        with:
+          mode: remediate
+          backend-url: ${{ secrets.TRUSTIFY_DA_BACKEND_URL }}
+          group-by: bundle
+          dry-run: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Print outputs
+        run: |
+          echo "pr-url=${{ steps.da.outputs.pr-url }}"
+          echo "changed-files=${{ steps.da.outputs.changed-files }}"
