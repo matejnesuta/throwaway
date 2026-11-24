@@ -1,0 +1,221 @@
+name: Smoke test — trustify-da-action
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend-url:
+        description: 'Trustify backend URL'
+        required: false
+        default: 'https://exhort.stage.devshift.net'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # ── 1. dry-run: gate must suppress PR creation ─────────────────────────────
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: da
+        uses: trustification/trustify-da-action@main
+        with:
+          mode: remediate
+          backend-url: ${{ inputs.backend-url }}
+          dry-run: 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert pr-url is empty
+        run: |
+          if [ -n "${{ steps.da.outputs.pr-url }}" ]; then
+            echo "FAIL — pr-url set in dry-run: ${{ steps.da.outputs.pr-url }}"
+            exit 1
+          fi
+          echo "PASS — pr-url is empty"
+      - name: Assert remediation-count is a non-negative integer
+        run: |
+          echo "${{ steps.da.outputs.remediation-count }}" | grep -Eq '^[0-9]+$' \
+            || { echo "FAIL — bad remediation-count"; exit 1; }
+          echo "PASS — remediation-count=${{ steps.da.outputs.remediation-count }}"
+
+  # ── 2. check: outputs + step summary ──────────────────────────────────────
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: da
+        uses: trustification/trustify-da-action@main
+        with:
+          mode: check
+          backend-url: ${{ inputs.backend-url }}
+      - name: Assert severity outputs are non-negative integers
+        run: |
+          for val in \
+            "${{ steps.da.outputs.critical-count }}" \
+            "${{ steps.da.outputs.high-count }}" \
+            "${{ steps.da.outputs.medium-count }}" \
+            "${{ steps.da.outputs.low-count }}" \
+            "${{ steps.da.outputs.remediation-count }}" \
+            "${{ steps.da.outputs.license-conflicts }}"; do
+            echo "$val" | grep -Eq '^[0-9]+$' \
+              || { echo "FAIL — not a non-negative integer: '$val'"; exit 1; }
+          done
+          echo "PASS"
+      - name: Assert step summary is non-empty
+        run: |
+          test -s "$GITHUB_STEP_SUMMARY" \
+            || { echo "FAIL — step summary is empty"; exit 1; }
+          echo "PASS"
+          echo "--- summary preview ---"
+          head -20 "$GITHUB_STEP_SUMMARY"
+
+  # ── 3. sbom: sbom-path output + artifact upload ───────────────────────────
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: da
+        uses: trustification/trustify-da-action@main
+        with:
+          mode: sbom
+      - name: Assert sbom-path is set and contains .cdx.json files
+        run: |
+          test -n "${{ steps.da.outputs.sbom-path }}" \
+            || { echo "FAIL — sbom-path not set"; exit 1; }
+          count=$(find "${{ steps.da.outputs.sbom-path }}" -name '*.cdx.json' | wc -l)
+          test "$count" -gt 0 \
+            || { echo "FAIL — no .cdx.json files in ${{ steps.da.outputs.sbom-path }}"; exit 1; }
+          echo "PASS — found $count .cdx.json file(s) at ${{ steps.da.outputs.sbom-path }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: ${{ steps.da.outputs.sbom-path }}
+
+  # ── 4. remediate bundle: pr-url, changed-files, label, branch prefix ──────
+  remediate-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: da
+        uses: trustification/trustify-da-action@main
+        with:
+          mode: remediate
+          backend-url: ${{ inputs.backend-url }}
+          group-by: bundle
+          branch-prefix: smoke-bundle
+          labels: smoke-test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert pr-url is set
+        run: |
+          test -n "${{ steps.da.outputs.pr-url }}" \
+            || { echo "FAIL — pr-url not set"; exit 1; }
+          echo "PASS — pr-url=${{ steps.da.outputs.pr-url }}"
+      - name: Assert changed-files is set
+        run: |
+          test -n "${{ steps.da.outputs.changed-files }}" \
+            || { echo "FAIL — changed-files not set"; exit 1; }
+          echo "PASS — changed-files=${{ steps.da.outputs.changed-files }}"
+      - name: Assert PR branch starts with smoke-bundle/
+        run: |
+          branch=$(gh pr view "${{ steps.da.outputs.pr-url }}" --json headRefName -q .headRefName)
+          echo "Branch: $branch"
+          echo "$branch" | grep -q '^smoke-bundle/' \
+            || { echo "FAIL — expected smoke-bundle/ prefix, got: $branch"; exit 1; }
+          echo "PASS"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert PR has smoke-test label
+        run: |
+          labels=$(gh pr view "${{ steps.da.outputs.pr-url }}" --json labels -q '[.labels[].name] | join(",")')
+          echo "Labels: $labels"
+          echo "$labels" | grep -q 'smoke-test' \
+            || { echo "FAIL — smoke-test label missing"; exit 1; }
+          echo "PASS"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 5. remediate dependency: per-dep branch naming ────────────────────────
+  remediate-dependency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: da
+        uses: trustification/trustify-da-action@main
+        with:
+          mode: remediate
+          backend-url: ${{ inputs.backend-url }}
+          group-by: dependency
+          branch-prefix: smoke-dep
+          labels: smoke-test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert pr-url is set
+        run: |
+          test -n "${{ steps.da.outputs.pr-url }}" \
+            || { echo "FAIL — pr-url not set"; exit 1; }
+          echo "PASS — pr-url=${{ steps.da.outputs.pr-url }}"
+      - name: Assert changed-files is set
+        run: |
+          test -n "${{ steps.da.outputs.changed-files }}" \
+            || { echo "FAIL — changed-files not set"; exit 1; }
+          echo "PASS — changed-files=${{ steps.da.outputs.changed-files }}"
+      - name: Assert every PR branch starts with smoke-dep/
+        run: |
+          IFS=',' read -ra urls <<< "${{ steps.da.outputs.pr-url }}"
+          for url in "${urls[@]}"; do
+            branch=$(gh pr view "$url" --json headRefName -q .headRefName)
+            echo "Branch: $branch"
+            echo "$branch" | grep -q '^smoke-dep/' \
+              || { echo "FAIL — expected smoke-dep/ prefix, got: $branch"; exit 1; }
+          done
+          echo "PASS"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 6. idempotency: second run must update, not duplicate the PR ──────────
+  idempotency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: first
+        uses: trustification/trustify-da-action@main
+        with:
+          mode: remediate
+          backend-url: ${{ inputs.backend-url }}
+          group-by: bundle
+          branch-prefix: smoke-idempotency
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Record first PR URL
+        run: echo "First run — pr-url=${{ steps.first.outputs.pr-url }}"
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+      - id: second
+        uses: trustification/trustify-da-action@main
+        with:
+          mode: remediate
+          backend-url: ${{ inputs.backend-url }}
+          group-by: bundle
+          branch-prefix: smoke-idempotency
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert same PR URL on both runs
+        run: |
+          first="${{ steps.first.outputs.pr-url }}"
+          second="${{ steps.second.outputs.pr-url }}"
+          echo "First:  $first"
+          echo "Second: $second"
+          test "$first" = "$second" \
+            || { echo "FAIL — different PR URLs: idempotency broken"; exit 1; }
+          echo "PASS"
+      - name: Assert exactly one open PR exists for smoke-idempotency
+        run: |
+          count=$(gh pr list --head "smoke-idempotency/remediate-vulnerabilities" --state open --json number -q length)
+          test "$count" -eq 1 \
+            || { echo "FAIL — expected 1 open PR, found $count"; exit 1; }
+          echo "PASS"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
